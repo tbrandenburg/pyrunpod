@@ -93,7 +93,7 @@ if selected_pod:
 
     if not pod_info.get("runtime"):
         logger.info("Selected pod is stopped. Starting...")
-        runpod.start_pod(pod_id)
+        runpod.resume_pod(pod_id)
         while True:
             pod_info = runpod.get_pod(pod_id)
             if pod_info.get("runtime"):
@@ -108,14 +108,14 @@ else:
         exit(0)
 
     gpu_count = 1
-    model_id = "deepseek-ai/deepseek-coder-6.7b-instruct"
-    gpu_type_id = "NVIDIA GeForce RTX 4080"
+    model_id = "tiiuae/falcon-7b-instruct"
+    gpu_type_id = "NVIDIA GeForce RTX 4090"
 
     logger.info("Creating new pod for model: %s", model_id)
 
     selected_pod = runpod.create_pod(
-        name="deepseek-coder-6.7b-instruct",
-        image_name="ghcr.io/huggingface/text-generation-inference:0.8",
+        name="falcon-7b-instruct",
+        image_name="ghcr.io/huggingface/text-generation-inference:latest",
         gpu_type_id=gpu_type_id,
         cloud_type="SECURE",
         docker_args=f"--model-id {model_id} --num-shard {gpu_count}",
