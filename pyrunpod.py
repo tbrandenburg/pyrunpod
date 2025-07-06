@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import logging
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 # Logging setup
 # -------------------------------
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to INFO or DEBUG as needed
+    level=logging.DEBUG,
     format='[%(asctime)s] [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -33,18 +34,29 @@ runpod.api_key = api_key
 # -------------------------------
 # Pod configuration
 # -------------------------------
-gpu_count = 2
-model_id = "deepseekcoder/33b"
+gpu_count = 1
+model_id = "deepseek-ai/deepseek-coder-33b-instruct"
 
 logger.info("Creating RunPod pod for model: %s", model_id)
+
+# Get all my pods
+pods = runpod.get_pods()
+
+if pods:
+    logger.info("Existing pods found:")
+    for pod in pods:
+        logger.info(f"{json.dumps(pod, indent=4)}")
+else:
+    logger.info("No existing pods found.")
+
 pod = runpod.create_pod(
-    name="deepseekcoder-33b",
+    name="deepseek-coder-33b-instruct",
     image_name="ghcr.io/huggingface/text-generation-inference:0.8",
     gpu_type_id="NVIDIA A100 80GB PCIe",
     cloud_type="SECURE",
     docker_args=f"--model-id {model_id} --num-shard {gpu_count}",
     gpu_count=gpu_count,
-    volume_in_gb=195,
+    volume_in_gb=96,
     container_disk_in_gb=5,
     ports="80/http,29500/http",
     volume_mount_path="/data",
@@ -55,10 +67,14 @@ pod = runpod.create_pod(
 # -------------------------------
 logger.info("Waiting for pod to reach RUNNING state...")
 while True:
-    status = runpod.get_pod(pod["id"])["status"]
-    if status == "RUNNING":
+    pod_info = runpod.get_pod(pod["id"])
+    logger.info("Pod info: %s", json.dumps(pod_info, indent=4))
+
+    if pod_info.get("runtime"):
+        logger.info("Pod is RUNNING (runtime present).")
         break
-    logger.info("Pod status: %s", status)
+
+    logger.info("Pod not ready yet (runtime missing). Waiting...")
     time.sleep(5)
 
 inference_url = f'https://{pod["id"]}-80.proxy.runpod.net/generate'
@@ -118,7 +134,7 @@ try:
         }
 
         try:
-            response = requests.post("http://localhost:8000/generate", json=payload)
+            response = requests.post("http://localhost:11435/generate", json=payload)
             result = response.json()
             output = result[0]["generated_text"] if isinstance(result, list) else result.get("generated_text", "")
             print("Model:", output.strip())
@@ -126,18 +142,6 @@ try:
             logger.error("Inference request failed: %s", str(e))
 
 finally:
-    logger.info("Deleting pod...")
-    runpod.delete_pod(pod["id"])
-
-    for _ in range(30):  # max wait ~60 seconds
-        try:
-            current_status = runpod.get_pod(pod["id"])
-            logger.info("Waiting for deletion... current status: %s", current_status['status'])
-            time.sleep(2)
-        except Exception:
-            logger.info("Pod deleted successfully.")
-            break
-    else:
-        logger.warning("Timeout while waiting for pod deletion. Check RunPod dashboard.")
-
-    logger.info("Shutdown complete.")
+    logger.info("Stopping pod...")
+    runpod.stop_pod(pod["id"])
+    logger.info("Stopping requested!")
