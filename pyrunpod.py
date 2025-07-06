@@ -41,17 +41,14 @@ runpod.api_key = api_key
 logger.info("Fetching available GPU types from RunPod:")
 gpu_types = runpod.get_gpus()
 
-id_width = 30
+id_width = 50
 name_width = 20
 vram_width = 12
-price_width = 16
 
 header = (
     f"{'GPU ID'.ljust(id_width)}  "
     f"{'Name'.ljust(name_width)}  "
     f"{'VRAM'.ljust(vram_width)}  "
-    f"{'Secure Price'.ljust(price_width)}  "
-    f"{'Community Price'}"
 )
 logger.info(header)
 logger.info("-" * len(header))
@@ -60,15 +57,11 @@ for gpu in gpu_types:
     gpu_id = gpu.get("id", "Unknown")
     display_name = gpu.get("displayName", "Unknown")
     memory_gb = f"{gpu.get('memoryInGb', 'N/A')}GB"
-    secure_price = f"${gpu.get('securePrice', 'N/A')}/hr"
-    community_price = f"${gpu.get('communityPrice', 'N/A')}/hr"
 
     line = (
         f"{gpu_id.ljust(id_width)}  "
         f"{display_name.ljust(name_width)}  "
         f"{memory_gb.ljust(vram_width)}  "
-        f"{secure_price.ljust(price_width)}  "
-        f"{community_price}"
     )
     logger.info(line)
 
@@ -116,7 +109,7 @@ else:
 
     gpu_count = 1
     model_id = "deepseek-ai/deepseek-coder-6.7b-instruct"
-    gpu_type_id = "NVIDIA L40S"
+    gpu_type_id = "NVIDIA GeForce RTX 4080"
 
     logger.info("Creating new pod for model: %s", model_id)
 
