@@ -2,12 +2,9 @@ import json
 import os
 import time
 import logging
-import threading
-import requests
 import runpod
-import uvicorn
-from fastapi import FastAPI, Request
 from dotenv import load_dotenv
+from langchain.llms import HuggingFaceTextGenInference
 
 # -------------------------------
 # Logging setup
@@ -77,43 +74,21 @@ while True:
     logger.info("Pod not ready yet (runtime missing). Waiting...")
     time.sleep(5)
 
-inference_url = f'https://{pod["id"]}-80.proxy.runpod.net/generate'
-logger.info("Model is live at: %s", inference_url)
-
 # -------------------------------
-# FastAPI proxy server setup
+# Setup LangChain LLM
 # -------------------------------
-app = FastAPI()
+inference_server_url = f'https://{pod["id"]}-80.proxy.runpod.net'
+llm = HuggingFaceTextGenInference(
+    inference_server_url=inference_server_url,
+    max_new_tokens=100,
+    top_k=10,
+    top_p=0.95,
+    typical_p=0.95,
+    temperature=0.001,
+    repetition_penalty=1.03,
+)
 
-@app.post("/generate")
-async def proxy(request: Request):
-    try:
-        data = await request.json()
-
-        json_preview = str(data)[:100].replace("\n", " ").replace("\r", " ")
-        logger.debug("Parsed request JSON preview: %s", json_preview)
-
-        response = requests.post(inference_url, json=data)
-
-        response_preview = response.text[:100].replace("\n", " ").replace("\r", " ")
-        logger.debug("Raw response preview: %s", response_preview)
-
-        return response.json()
-    except Exception as e:
-        logger.error("Proxy error: %s", str(e))
-        return {"error": str(e)}
-
-def start_proxy():
-    uvicorn.run(app, host="0.0.0.0", port=11435)
-
-proxy_thread = threading.Thread(target=start_proxy, daemon=True)
-proxy_thread.start()
-time.sleep(2)
-logger.info("Local proxy is running at http://localhost:11435/generate")
-
-# -------------------------------
-# Interactive CLI loop
-# -------------------------------
+logger.info("Model is live at: %s", inference_server_url)
 logger.info("Enter your prompts below. Type '/bye' to exit and shut down the pod.")
 
 try:
@@ -123,20 +98,8 @@ try:
             logger.info("Shutting down the pod...")
             break
 
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 100,
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "repetition_penalty": 1.03
-            }
-        }
-
         try:
-            response = requests.post("http://localhost:11435/generate", json=payload)
-            result = response.json()
-            output = result[0]["generated_text"] if isinstance(result, list) else result.get("generated_text", "")
+            output = llm(prompt)
             print("Model:", output.strip())
         except Exception as e:
             logger.error("Inference request failed: %s", str(e))

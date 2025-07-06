@@ -1,0 +1,6 @@
+runpod
+python-dotenv
+langchain
+langchain_community
+huggingface_hub
+text-generation
