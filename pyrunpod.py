@@ -1,10 +1,17 @@
-import json
 import os
+import json
 import time
+import threading
 import logging
-import runpod
+import requests
+
 from dotenv import load_dotenv
-from langchain.llms import HuggingFaceTextGenInference
+import runpod
+
+from fastapi import FastAPI, Request
+import uvicorn
+
+from langchain_community.llms import HuggingFaceTextGenInference
 
 # -------------------------------
 # Logging setup
@@ -29,57 +36,153 @@ if not api_key:
 runpod.api_key = api_key
 
 # -------------------------------
-# Pod configuration
+# Display available GPUs
 # -------------------------------
-gpu_count = 1
-model_id = "deepseek-ai/deepseek-coder-33b-instruct"
+logger.info("Fetching available GPU types from RunPod:")
+gpu_types = runpod.get_gpus()
 
-logger.info("Creating RunPod pod for model: %s", model_id)
+id_width = 30
+name_width = 20
+vram_width = 12
+price_width = 16
 
-# Get all my pods
+header = (
+    f"{'GPU ID'.ljust(id_width)}  "
+    f"{'Name'.ljust(name_width)}  "
+    f"{'VRAM'.ljust(vram_width)}  "
+    f"{'Secure Price'.ljust(price_width)}  "
+    f"{'Community Price'}"
+)
+logger.info(header)
+logger.info("-" * len(header))
+
+for gpu in gpu_types:
+    gpu_id = gpu.get("id", "Unknown")
+    display_name = gpu.get("displayName", "Unknown")
+    memory_gb = f"{gpu.get('memoryInGb', 'N/A')}GB"
+    secure_price = f"${gpu.get('securePrice', 'N/A')}/hr"
+    community_price = f"${gpu.get('communityPrice', 'N/A')}/hr"
+
+    line = (
+        f"{gpu_id.ljust(id_width)}  "
+        f"{display_name.ljust(name_width)}  "
+        f"{memory_gb.ljust(vram_width)}  "
+        f"{secure_price.ljust(price_width)}  "
+        f"{community_price}"
+    )
+    logger.info(line)
+
+# -------------------------------
+# Pod selection / creation
+# -------------------------------
 pods = runpod.get_pods()
+selected_pod = None
 
 if pods:
-    logger.info("Existing pods found:")
-    for pod in pods:
-        logger.info(f"{json.dumps(pod, indent=4)}")
+    logger.info("Available pods:")
+    for idx, pod in enumerate(pods):
+        runtime_present = "runtime" in pod
+        state = "RUNNING" if runtime_present else "STOPPED"
+        logger.info(f"{idx + 1}: {pod['name']} [{state}]")
+
+    try:
+        choice = input("Select a pod number to reuse, or press Enter to skip: ").strip()
+        if choice:
+            idx = int(choice) - 1
+            if 0 <= idx < len(pods):
+                selected_pod = pods[idx]
+    except Exception:
+        logger.warning("Invalid selection. A new pod will be created.")
+
+if selected_pod:
+    pod_id = selected_pod["id"]
+    pod_info = runpod.get_pod(pod_id)
+
+    if not pod_info.get("runtime"):
+        logger.info("Selected pod is stopped. Starting...")
+        runpod.start_pod(pod_id)
+        while True:
+            pod_info = runpod.get_pod(pod_id)
+            if pod_info.get("runtime"):
+                logger.info("Pod is now RUNNING.")
+                break
+            logger.info("Waiting for pod to start...")
+            time.sleep(5)
 else:
-    logger.info("No existing pods found.")
+    confirm = input("No pod selected. Launch a new one? (y/n): ").strip().lower()
+    if confirm != 'y':
+        logger.info("No pod selected or created. Exiting.")
+        exit(0)
 
-pod = runpod.create_pod(
-    name="deepseek-coder-33b-instruct",
-    image_name="ghcr.io/huggingface/text-generation-inference:0.8",
-    gpu_type_id="NVIDIA A100 80GB PCIe",
-    cloud_type="SECURE",
-    docker_args=f"--model-id {model_id} --num-shard {gpu_count}",
-    gpu_count=gpu_count,
-    volume_in_gb=96,
-    container_disk_in_gb=5,
-    ports="80/http,29500/http",
-    volume_mount_path="/data",
-)
+    gpu_count = 1
+    model_id = "deepseek-ai/deepseek-coder-6.7b-instruct"
+    gpu_type_id = "NVIDIA L40S"
+
+    logger.info("Creating new pod for model: %s", model_id)
+
+    selected_pod = runpod.create_pod(
+        name="deepseek-coder-6.7b-instruct",
+        image_name="ghcr.io/huggingface/text-generation-inference:0.8",
+        gpu_type_id=gpu_type_id,
+        cloud_type="SECURE",
+        docker_args=f"--model-id {model_id} --num-shard {gpu_count}",
+        gpu_count=gpu_count,
+        volume_in_gb=96,
+        container_disk_in_gb=5,
+        ports="80/http,29500/http",
+        volume_mount_path="/data",
+    )
+
+    pod_id = selected_pod["id"]
+
+    logger.info("Waiting for pod to become RUNNING...")
+    while True:
+        pod_info = runpod.get_pod(pod_id)
+        if pod_info.get("runtime"):
+            logger.info("Pod is now RUNNING.")
+            break
+        time.sleep(5)
 
 # -------------------------------
-# Wait for pod to be RUNNING
+# Inference endpoint setup
 # -------------------------------
-logger.info("Waiting for pod to reach RUNNING state...")
-while True:
-    pod_info = runpod.get_pod(pod["id"])
-    logger.info("Pod info: %s", json.dumps(pod_info, indent=4))
-
-    if pod_info.get("runtime"):
-        logger.info("Pod is RUNNING (runtime present).")
-        break
-
-    logger.info("Pod not ready yet (runtime missing). Waiting...")
-    time.sleep(5)
+inference_url = f'https://{pod_info["id"]}-80.proxy.runpod.net'
+logger.info(f"Model is live at: {inference_url}")
 
 # -------------------------------
-# Setup LangChain LLM
+# FastAPI proxy server setup
 # -------------------------------
-inference_server_url = f'https://{pod["id"]}-80.proxy.runpod.net'
+app = FastAPI()
+
+@app.post("/generate")
+async def proxy(request: Request):
+    try:
+        data = await request.json()
+        json_preview = str(data)[:100].replace("\n", " ").replace("\r", " ")
+        logger.debug("Parsed request JSON preview: %s", json_preview)
+
+        response = requests.post(f"{inference_url}/generate", json=data)
+        response_preview = response.text[:100].replace("\n", " ").replace("\r", " ")
+        logger.debug("Raw response preview: %s", response_preview)
+
+        return response.json()
+    except Exception as e:
+        logger.error("Proxy error: %s", str(e))
+        return {"error": str(e)}
+
+def start_proxy():
+    uvicorn.run(app, host="0.0.0.0", port=11435)
+
+proxy_thread = threading.Thread(target=start_proxy, daemon=True)
+proxy_thread.start()
+time.sleep(2)
+logger.info("Local proxy is running at http://localhost:11435/generate")
+
+# -------------------------------
+# LangChain CLI
+# -------------------------------
 llm = HuggingFaceTextGenInference(
-    inference_server_url=inference_server_url,
+    inference_server_url=inference_url,
     max_new_tokens=100,
     top_k=10,
     top_p=0.95,
@@ -88,7 +191,6 @@ llm = HuggingFaceTextGenInference(
     repetition_penalty=1.03,
 )
 
-logger.info("Model is live at: %s", inference_server_url)
 logger.info("Enter your prompts below. Type '/bye' to exit and shut down the pod.")
 
 try:
@@ -97,14 +199,11 @@ try:
         if prompt.strip().lower() == "/bye":
             logger.info("Shutting down the pod...")
             break
-
         try:
             output = llm(prompt)
             print("Model:", output.strip())
         except Exception as e:
             logger.error("Inference request failed: %s", str(e))
-
 finally:
-    logger.info("Stopping pod...")
-    runpod.stop_pod(pod["id"])
-    logger.info("Stopping requested!")
+    runpod.stop_pod(pod_info["id"])
+    logger.info("Pod stop requested.")
